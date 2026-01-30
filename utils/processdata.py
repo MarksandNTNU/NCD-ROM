@@ -37,7 +37,7 @@ def Padding(data, lag):
     Extract time-series of lenght equal to lag from longer time series in data, whose dimension is (number of time series, sequence length, data shape)
     '''
     
-    data_out = torch.zeros(data.shape[0] * data.shape[1], lag, data.shape[2])
+    data_out = np.zeros((data.shape[0] * data.shape[1], lag, data.shape[2]))
 
     for i in range(data.shape[0]):
         for j in range(1, data.shape[1] + 1):
@@ -348,3 +348,59 @@ def animate(yts, plot, fps = 5, axis = False, save = False, name = "animation"):
         print(f"Animation saved as {name}.gif")
     
     return frames
+
+def trajectory(yt, plot, title = None, fontsize = None, figsize = None, axis = False, save = False, name = 'gif'):
+    """
+    Trajectory gif
+    Input: trajectory with dimension (sequence length, data shape), related plot function for a snapshot, plot options, save option and save path
+    """
+
+    arrays = []
+        
+    for i in range(yt.shape[0]):
+        plt.figure(figsize = figsize)
+        plot(yt[i])
+        plt.title(title, fontsize = fontsize)
+        if not axis:
+            plt.axis('off')
+        fig = plt.gcf()
+        display(fig)
+        if save:
+            arrays.append(np.array(fig.canvas.renderer.buffer_rgba()))
+        plt.close()
+        clc(wait=True)
+
+    if save:
+        imageio.mimsave(name.replace(".gif", "") + ".gif", arrays)
+        
+
+def trajectories(yts, plot, titles = None, fontsize = None, figsize = None, vertical = False, axis = False, save = False, name = 'gif'):
+    """
+    Gif of different trajectories
+    Input: list of trajectories with dimensions (sequence length, data shape), plot function for a snapshot, plot options, save option and save path
+    """
+
+    arrays = []
+
+    for i in range(yts[0].shape[0]):
+
+        plt.figure(figsize = figsize)
+        for j in range(len(yts)):
+            if vertical:
+                plt.subplot(len(yts), 1, j+1)
+            else:
+                plt.subplot(1, len(yts), j+1)
+            plot(yts[j][i])
+            plt.title(titles[j], fontsize = fontsize)
+            if not axis:
+                plt.axis('off')
+
+        fig = plt.gcf()
+        display(fig)
+        if save:
+            arrays.append(np.array(fig.canvas.renderer.buffer_rgba()))
+        plt.close()
+        clc(wait=True)
+
+    if save:
+        imageio.mimsave(name.replace(".gif", "") + ".gif", arrays)

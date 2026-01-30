@@ -77,6 +77,104 @@ class NeuralCDE(eqx.Module):
         prediction = self.decoder(final_hidden)
         return prediction
 
+def dropout(x, p, key, training: bool):
+    if not training or p == 0.0:
+        return x
+    keep = 1.0 - p
+    mask = jr.bernoulli(key, keep, x.shape)
+    return x * mask / keep
+
+
+class SHRED(eqx.Module):
+    lstms: tuple
+    decoder: eqx.nn.Sequential
+    hidden_layers: int
+    hidden_size: int
+    dropout_p: float
+
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        hidden_size=64,
+        hidden_layers=2,
+        decoder_sizes=(350, 400),
+        activation=jax.nn.relu,
+        dropout_p=0.1,
+        *,
+        key,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        # store fields (THIS was missing)
+        self.hidden_size = hidden_size
+        self.hidden_layers = hidden_layers
+        self.dropout_p = dropout_p
+
+        # decoder sizes
+        sizes = (hidden_size,) + tuple(decoder_sizes) + (output_size,)
+        num_linear_layers = len(sizes) - 1
+
+        # keys
+        keys = jr.split(key, hidden_layers + num_linear_layers)
+        lstm_keys = keys[:hidden_layers]
+        dec_keys = keys[hidden_layers:]
+
+        # LSTM stack
+        self.lstms = tuple(
+            eqx.nn.LSTMCell(
+                input_size=input_size if i == 0 else hidden_size,
+                hidden_size=hidden_size,
+                key=lstm_keys[i],
+            )
+            for i in range(hidden_layers)
+        )
+
+        # Decoder
+        layers = []
+        for i in range(num_linear_layers):
+            layers.append(eqx.nn.Linear(sizes[i], sizes[i + 1], key=dec_keys[i]))
+            if i != num_linear_layers - 1:
+                layers.append(eqx.nn.Lambda(activation))
+
+        self.decoder = eqx.nn.Sequential(layers)
+
+    def __call__(self, x, *, key=None, training=True):
+        if key is None:
+            key = jr.PRNGKey(0)
+
+        # keys for dropout per timestep
+        step_keys = jr.split(key, x.shape[0])
+
+        # zero initial states
+        states = tuple(
+            (jnp.zeros(self.hidden_size), jnp.zeros(self.hidden_size))
+            for _ in range(self.hidden_layers)
+        )
+
+        def step(carry, inputs):
+            states, key_t = carry
+            x_t = inputs
+
+            new_states = []
+            inp = x_t
+
+            for i, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
+                h, c = lstm(inp, (h, c))
+                h = dropout(h, self.dropout_p, jr.fold_in(key_t, i), training)
+                new_states.append((h, c))
+                inp = h
+
+            return (tuple(new_states), key_t), inp
+
+        (_, _), hs = jax.lax.scan(step, (states, key), (x, step_keys))
+        final_hidden = hs[-1]
+
+        final_hidden = dropout(final_hidden, self.dropout_p, jr.fold_in(key, 999), training)
+
+        return self.decoder(final_hidden)
+
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
     assert all(array.shape[0] == dataset_size for array in arrays)
@@ -93,31 +191,31 @@ def dataloader(arrays, batch_size, *, key):
             end = start + batch_size
 
 
-def prepare_data(X, Y):
+def prepare_data_CDE(X, Y):
     ts = X[:,:, -1]
     ys = X[:,:,:-1]
     coeffs = jax.vmap(diffrax.backward_hermite_coefficients)(ts, ys)
     _, _, data_size = ys.shape
     return {'ts': ts, 'Y':Y, 'coeffs':coeffs}, data_size
 
+
 @eqx.filter_jit 
-def loss_mse(model, ti, y_i, coeff_i):
+def loss_mse_CDE(model, ti, y_i, coeff_i):
     preds = jax.vmap(model)(ti, coeff_i)
     return jnp.mean((preds - y_i)**2)
 
 @eqx.filter_jit 
-def loss_rmsre(model, ti, y_i, coeff_i):
+def loss_rmsre_CDE(model, ti, y_i, coeff_i):
     preds = jax.vmap(model)(ti, coeff_i)
     return jnp.sqrt(jnp.mean((preds - y_i)**2))/ jnp.sqrt(jnp.mean((y_i**2)))
 
 
 
 @eqx.filter_jit 
-def make_step(model, data_i, opt_state, optim, lr_scale):
+def make_step_CDE(model, data_i, opt_state, optim):
     ti, y_i, *coeff_i = data_i
-    mse, grads = eqx.filter_value_and_grad(loss_mse, has_aux=False)(model, ti, y_i, coeff_i)
+    mse, grads = eqx.filter_value_and_grad(loss_mse_CDE, has_aux=False)(model, ti, y_i, coeff_i)
     updates, opt_state = optim.update(grads, opt_state)
-    updates = jax.tree_util.tree_map(lambda x: lr_scale * x, updates)
     model = eqx.apply_updates(model, updates)
     return mse, model, opt_state
 
@@ -162,32 +260,27 @@ def make_warmup_piecewise_schedule_explicit(
 
 
 
-def fit(model, train_data, valid_data,  steps, batch_size, schedule = None, seed = 42,  early_stopping = 60, warmup_steps = 100):
+def fit_CDE(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  early_stopping = 60, warmup_steps = 100):
     key = jr.PRNGKey(seed)
     train_loader_key, valid_loader_key = jr.split(key, 2)
-    if schedule is None:
-        schedule = make_warmup_piecewise_schedule_explicit([1e-2, 1e-3, 1e-4], boundaries=[steps//4, steps//2, 3*steps//4], warmup_steps=warmup_steps)
-    optim = optax.chain(optax.scale_by_adam(),optax.scale_by_schedule(schedule),optax.scale(-1.0))
+    optim = optax.adam(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     train_losses = []
     valid_losses = []
     best_loss = jnp.inf
     early_stopping_counter = 0 
-    lr_scale = 1.0 
-    lr_list = []
     for step, data_train_i, data_valid_i in zip(range(steps),  
                                                 dataloader((train_data['ts'], train_data['Y']) + train_data['coeffs'], batch_size, key = train_loader_key), 
                                                 dataloader((valid_data['ts'], valid_data['Y']) + valid_data['coeffs'], batch_size, key = valid_loader_key)):
         start = time.time()
-        train_mse, model, opt_state = make_step(model, data_train_i, opt_state, optim, lr_scale)
+        train_mse, model, opt_state = make_step_CDE(model, data_train_i, opt_state, optim)
         ti_valid, y_i_valid, *coeff_valid_i = data_valid_i
-        valid_mse = loss_mse(model,ti_valid, y_i_valid, coeff_valid_i)
+        valid_mse = loss_mse_CDE(model,ti_valid, y_i_valid, coeff_valid_i)
         end = time.time()
         train_losses.append(train_mse)
         valid_losses.append(valid_mse)
-        current_lr = schedule(step) * lr_scale
-        lr_list.append(current_lr)
-        print(f"Step {step:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e} | LR {current_lr:.3e} | Time {(end-start):.3f}s | Early stopping counter = {early_stopping_counter}", end='\r', flush=True)
+
+        print(f"Step {step:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e} | LR {lr:.3e} | Time {(end-start):.3f}s | Early stopping counter = {early_stopping_counter}", end='\r', flush=True)
         if valid_mse < best_loss:
             best_loss = valid_mse 
             best_model = jax.tree_util.tree_map(lambda x: x, model)
@@ -197,9 +290,107 @@ def fit(model, train_data, valid_data,  steps, batch_size, schedule = None, seed
         if early_stopping_counter >= early_stopping and steps >= warmup_steps:
             print(f'Early stopping at step {step}, with best validation loss {best_loss}')
             break 
-    return best_model, train_losses, valid_losses, lr_list
+    return best_model, train_losses, valid_losses
 
     
+
+@eqx.filter_jit 
+def loss_mse_SHRED(model, S_i, y_i):
+    preds = jax.vmap(model)(S_i)
+    return jnp.mean((preds - y_i)**2)
+
+@eqx.filter_jit 
+def loss_rmsre_SHRED(model, S_i, y_i):
+    preds = jax.vmap(model)(S_i)
+    return jnp.sqrt(jnp.mean((preds - y_i)**2))/ jnp.sqrt(jnp.mean((y_i**2)))
+
+
+@eqx.filter_jit 
+def make_step_SHRED(model, data_i, opt_state, optim):
+    S_i, y_i = data_i
+    mse, grads = eqx.filter_value_and_grad(loss_mse_SHRED, has_aux=False)(model, S_i, y_i)
+    updates, opt_state = optim.update(grads, opt_state)
+    model = eqx.apply_updates(model, updates)
+    return mse, model, opt_state
+
+def make_warmup_cosine_schedule(lr, warmup_steps, total_steps):
+    return optax.join_schedules(
+        schedules=[
+            optax.linear_schedule(
+                init_value=0.0,
+                end_value=lr,
+                transition_steps=warmup_steps,
+            ),
+            optax.cosine_decay_schedule(
+                init_value=lr,
+                decay_steps=total_steps - warmup_steps,
+            ),
+        ],
+        boundaries=[warmup_steps],
+    )
+
+import optax
+
+def make_warmup_piecewise_schedule_explicit(
+    learning_rates,
+    boundaries,
+    warmup_steps,
+):
+    assert len(boundaries) == len(learning_rates), (
+        "boundaries must have same length as learning_rates"
+    )
+
+    schedules = []
+
+
+    schedules.append(
+        optax.linear_schedule(init_value=0.0, end_value=learning_rates[0], transition_steps=warmup_steps))
+    schedules += [optax.constant_schedule(lr) for lr in learning_rates]
+
+    return optax.join_schedules(
+        schedules=schedules,
+        boundaries=boundaries,
+    )
+
+
+
+def fit_SHRED(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  early_stopping = 60, warmup_steps = 100):
+    key = jr.PRNGKey(seed)
+    train_loader_key, valid_loader_key = jr.split(key, 2)
+    optim = optax.adam(lr)
+    opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
+    train_losses = []
+    valid_losses = []
+    best_loss = jnp.inf
+    early_stopping_counter = 0 
+    for step, data_train_i, data_valid_i in zip(range(steps),  
+                                                dataloader((train_data['S_i'], train_data['Y']), batch_size, key = train_loader_key), 
+                                                dataloader((valid_data['S_i'], valid_data['Y']), batch_size, key = valid_loader_key)):
+        start = time.time()
+        train_mse, model, opt_state = make_step_SHRED(model, data_train_i, opt_state, optim)
+        S_i_valid, y_i_valid = data_valid_i
+        valid_mse = loss_mse_SHRED(model,S_i_valid, y_i_valid)
+        end = time.time()
+        train_losses.append(train_mse)
+        valid_losses.append(valid_mse)
+
+        print(f"Step {step:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e} | LR {lr:.3e} | Time {(end-start):.3f}s | Early stopping counter = {early_stopping_counter}", end='\r', flush=True)
+        if valid_mse < best_loss:
+            best_loss = valid_mse 
+            best_model = model # jax.tree_util.tree_map(lambda x: x, model)
+            early_stopping_counter = 0
+        else:
+            early_stopping_counter +=1 
+        if early_stopping_counter >= early_stopping and steps >= warmup_steps:
+            print(f'Early stopping at step {step}, with best validation loss {best_loss}')
+            break 
+    return best_model, train_losses, valid_losses
+
+    
+
+
+
+
 
 
 
