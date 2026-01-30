@@ -77,15 +77,90 @@ class NeuralCDE(eqx.Module):
         prediction = self.decoder(final_hidden)
         return prediction
 
-def dropout(x, p, key, training: bool):
-    if not training or p == 0.0:
-        return x
-    keep = 1.0 - p
-    mask = jr.bernoulli(key, keep, x.shape)
-    return x * mask / keep
-
-
 class SHRED(eqx.Module):
+    lstms: tuple
+    decoder: eqx.nn.Sequential
+    hidden_layers: int
+    hidden_size: int
+
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        hidden_size=64,
+        hidden_layers=2,
+        decoder_sizes=(350, 400),
+        activation=jax.nn.relu,
+        *,
+        key,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        # store fields
+        self.hidden_size = hidden_size
+        self.hidden_layers = hidden_layers
+
+        # decoder sizes
+        sizes = (hidden_size,) + tuple(decoder_sizes) + (output_size,)
+        num_linear_layers = len(sizes) - 1
+
+        # keys
+        keys = jr.split(key, hidden_layers + num_linear_layers)
+        lstm_keys = keys[:hidden_layers]
+        dec_keys = keys[hidden_layers:]
+
+        # LSTM stack
+        self.lstms = tuple(
+            eqx.nn.LSTMCell(
+                input_size=input_size if i == 0 else hidden_size,
+                hidden_size=hidden_size,
+                key=lstm_keys[i],
+            )
+            for i in range(hidden_layers)
+        )
+
+        # Decoder
+        layers = []
+        for i in range(num_linear_layers):
+            layers.append(eqx.nn.Linear(sizes[i], sizes[i + 1], key=dec_keys[i]))
+            if i != num_linear_layers - 1:
+                layers.append(eqx.nn.Lambda(activation))
+
+        self.decoder = eqx.nn.Sequential(layers)
+
+    def __call__(self, x, *, key=None, training=True):
+        if key is None:
+            key = jr.PRNGKey(0)
+
+        # Ensure x is a JAX array
+        x = jnp.asarray(x)
+        
+        # zero initial states
+        states = tuple(
+            (jnp.zeros(self.hidden_size, dtype=x.dtype), 
+             jnp.zeros(self.hidden_size, dtype=x.dtype))
+            for _ in range(self.hidden_layers)
+        )
+
+        def step(carry, inputs):
+            states = carry
+            x_t = inputs
+
+            new_states = []
+            inp = x_t
+
+            for i, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
+                h, c = lstm(inp, (h, c))
+                new_states.append((h, c))
+                inp = h
+
+            return tuple(new_states), inp
+
+        _, hs = jax.lax.scan(step, states, x)
+        final_hidden = hs[-1]
+
+        return self.decoder(final_hidden)
     lstms: tuple
     decoder: eqx.nn.Sequential
     hidden_layers: int
@@ -140,41 +215,44 @@ class SHRED(eqx.Module):
 
         self.decoder = eqx.nn.Sequential(layers)
 
-    def __call__(self, x, *, key=None, training=True):
-        if key is None:
-            key = jr.PRNGKey(0)
+def __call__(self, x, *, key=None, training=True):
+    if key is None:
+        key = jr.PRNGKey(0)
 
-        # keys for dropout per timestep
-        step_keys = jr.split(key, x.shape[0])
+    # Ensure x is a JAX array
+    x = jnp.asarray(x)
+    
+    # keys for dropout per timestep
+    step_keys = jr.split(key, x.shape[0])
 
-        # zero initial states
-        states = tuple(
-            (jnp.zeros(self.hidden_size), jnp.zeros(self.hidden_size))
-            for _ in range(self.hidden_layers)
-        )
+    # zero initial states - CRITICAL: these must be arrays, not tuples
+    states = tuple(
+        (jnp.zeros(self.hidden_size, dtype=x.dtype), 
+         jnp.zeros(self.hidden_size, dtype=x.dtype))
+        for _ in range(self.hidden_layers)
+    )
 
-        def step(carry, inputs):
-            states, key_t = carry
-            x_t = inputs
+    def step(carry, inputs):
+        states, key_t = carry
+        x_t, key_step = inputs
+        
+        new_states = []
+        inp = x_t
+        
+        for i, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
+            h, c = lstm(inp, (h, c))
+            h = dropout(h, self.dropout_p, jr.fold_in(key_step, i), training)
+            new_states.append((h, c))
+            inp = h
+        
+        return (tuple(new_states), key_step), inp
+    
+    (_, _), hs = jax.lax.scan(step, (states, key), (x, step_keys))
+    final_hidden = hs[-1]
 
-            new_states = []
-            inp = x_t
+    final_hidden = dropout(final_hidden, self.dropout_p, jr.fold_in(key, 999), training)
 
-            for i, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
-                h, c = lstm(inp, (h, c))
-                h = dropout(h, self.dropout_p, jr.fold_in(key_t, i), training)
-                new_states.append((h, c))
-                inp = h
-
-            return (tuple(new_states), key_t), inp
-
-        (_, _), hs = jax.lax.scan(step, (states, key), (x, step_keys))
-        final_hidden = hs[-1]
-
-        final_hidden = dropout(final_hidden, self.dropout_p, jr.fold_in(key, 999), training)
-
-        return self.decoder(final_hidden)
-
+    return self.decoder(final_hidden)
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
     assert all(array.shape[0] == dataset_size for array in arrays)
@@ -293,17 +371,15 @@ def fit_CDE(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  e
     return best_model, train_losses, valid_losses
 
     
-
 @eqx.filter_jit 
 def loss_mse_SHRED(model, S_i, y_i):
-    preds = jax.vmap(model)(S_i)
+    preds = eqx.filter_vmap(model)(S_i)
     return jnp.mean((preds - y_i)**2)
 
 @eqx.filter_jit 
 def loss_rmsre_SHRED(model, S_i, y_i):
-    preds = jax.vmap(model)(S_i)
-    return jnp.sqrt(jnp.mean((preds - y_i)**2))/ jnp.sqrt(jnp.mean((y_i**2)))
-
+    preds = eqx.filter_vmap(model)(S_i)
+    return jnp.sqrt(jnp.mean((preds - y_i)**2)) / jnp.sqrt(jnp.mean((y_i**2)))
 
 @eqx.filter_jit 
 def make_step_SHRED(model, data_i, opt_state, optim):
