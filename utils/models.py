@@ -5,24 +5,22 @@ from .processdata_torch import mse, mre, num2p
 
 class SHRED(torch.nn.Module):
 
-    def __init__(self, input_size, output_size, hidden_size = 64, hidden_layers = 2, decoder_sizes = [350, 400], dropout = 0.0, activation = torch.nn.ReLU(), device = torch.device("cpu")):
-        '''
-        SHRED model definition
-        
-        Inputs
-        	input size (e.g. number of sensors)
-        	output size (e.g. full-order variable dimension)
-        	size of LSTM hidden layers (default to 64)
-        	number of LSTM hidden layers (default to 2)
-        	list of decoder layers sizes (default to [350, 400])
-        	dropout parameter (default to 0)
-        '''
+    def __init__(self, input_size, output_size, hidden_size=64, hidden_layers=2, 
+                 decoder_sizes=None, dropout=0.0, activation=torch.nn.ReLU(), 
+                 device=torch.device("cpu")):
+        '''SHRED model definition'''
             
-        super(SHRED,self).__init__()
+        super(SHRED, self).__init__()
 
-        self.lstm = torch.nn.LSTM(input_size = input_size,
-                                  hidden_size = hidden_size,
-                                  num_layers = hidden_layers,
+        # FIX: Handle the default case and don't mutate the argument
+        if decoder_sizes is None:
+            decoder_sizes = [350, 400]
+        else:
+            decoder_sizes = list(decoder_sizes)  # Make a copy to avoid mutation!
+
+        self.lstm = torch.nn.LSTM(input_size=input_size,
+                                  hidden_size=hidden_size,
+                                  num_layers=hidden_layers,
                                   batch_first=True)
         
         self.decoder = torch.nn.ModuleList()
@@ -33,11 +31,12 @@ class SHRED(torch.nn.Module):
             self.decoder.append(torch.nn.Linear(decoder_sizes[i], decoder_sizes[i+1]))
             if i != len(decoder_sizes)-2:
                 self.decoder.append(torch.nn.Dropout(dropout))
-                self.decoder.append(activation )
+                self.decoder.append(activation)
 
         self.hidden_layers = hidden_layers
         self.hidden_size = hidden_size
         self.device = device
+    
     def forward(self, x):
         
         h_0 = torch.zeros((self.hidden_layers, x.size(0), self.hidden_size), dtype=torch.float).to(self.device)
@@ -158,7 +157,6 @@ def forecast(forecaster, input_data, steps, nsensors):
         input_data[:,-1, :nsensors] = forecast[i]
 
     return torch.stack(forecast, 1)
-
 
 
 
