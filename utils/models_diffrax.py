@@ -173,70 +173,8 @@ def make_step_CDE(model, data_i, opt_state, optim):
     model = eqx.apply_updates(model, updates)
     return mse, model, opt_state
 
-
-class CustomLSTMCell(eqx.Module):
-    """Custom LSTM cell with PyTorch-compatible initialization."""
-    
-    weight_ih: jnp.ndarray
-    weight_hh: jnp.ndarray
-    bias: jnp.ndarray
-    input_size: int
-    hidden_size: int
-    
-    def __init__(self, input_size: int, hidden_size: int, *, key):
-        """Initialize LSTM cell matching PyTorch nn.LSTM."""
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        
-        key1, key2 = jr.split(key, 2)
-        
-        # PyTorch uses: bound = sqrt(1.0 / hidden_size)
-        bound = jnp.sqrt(1.0 / hidden_size)
-        
-        # Initialize weights
-        self.weight_ih = jr.uniform(
-            key1,
-            shape=(4 * hidden_size, input_size),
-            minval=-bound,
-            maxval=bound
-        )
-        
-        self.weight_hh = jr.uniform(
-            key2,
-            shape=(4 * hidden_size, hidden_size),
-            minval=-bound,
-            maxval=bound
-        )
-        
-        # Bias: zeros except forget gate = 1.0
-        self.bias = jnp.zeros(4 * hidden_size)
-        self.bias = self.bias.at[hidden_size:2*hidden_size].set(1.0)
-    
-    def __call__(self, x, state):
-        """Forward pass through LSTM cell."""
-        h, c = state
-        
-        # Compute gates
-        gates_ih = jnp.dot(self.weight_ih, x) + self.bias
-        gates_hh = jnp.dot(self.weight_hh, h)
-        gates = gates_ih + gates_hh
-        
-        # Split and apply activations
-        i, f, g, o = jnp.split(gates, 4)
-        i = jax.nn.sigmoid(i)
-        f = jax.nn.sigmoid(f)
-        g = jnp.tanh(g)
-        o = jax.nn.sigmoid(o)
-        
-        # Update states
-        c_new = f * c + i * g
-        h_new = o * jnp.tanh(c_new)
-        
-        return h_new, c_new
-
-
 class SHRED_diffrax(eqx.Module):
-    """SHRED model with PyTorch-compatible initialization (Kaiming for decoder)."""
+    """SHRED model with PyTorch-compatible initialization."""
     
     lstms: tuple
     decoder: eqx.nn.Sequential
@@ -261,11 +199,7 @@ class SHRED_diffrax(eqx.Module):
         self.hidden_size = hidden_size
         self.hidden_layers = hidden_layers
         
-        # Generate keys
-        num_decoder_layers = len(decoder_sizes) + 1
-        total_keys = hidden_layers + num_decoder_layers
-        keys = jr.split(key, total_keys)
-        
+        keys = jr.split(key, hidden_layers + len(decoder_sizes) + 1)
         lstm_keys = keys[:hidden_layers]
         dec_keys = keys[hidden_layers:]
         
@@ -280,7 +214,7 @@ class SHRED_diffrax(eqx.Module):
             lstms.append(lstm)
         self.lstms = tuple(lstms)
 
-        # Create decoder with KAIMING initialization (matches PyTorch)
+        # Create decoder (same as before)
         sizes = (hidden_size,) + tuple(decoder_sizes) + (output_size,)
         layers = []
         
@@ -288,28 +222,15 @@ class SHRED_diffrax(eqx.Module):
             in_features = sizes[i]
             out_features = sizes[i + 1]
             
-            # Create linear layer
             linear = eqx.nn.Linear(in_features, out_features, key=dec_keys[i])
             
-            # Kaiming uniform initialization
-            # PyTorch formula: bound = sqrt(6 / ((1 + a²) * fan_in))
-            # where a = sqrt(5) for ReLU networks
             a = math.sqrt(5)
             bound = math.sqrt(6.0 / ((1.0 + a**2) * in_features))
             
-            # Initialize weights
             layer_key = jr.fold_in(dec_keys[i], i)
-            new_weight = jr.uniform(
-                layer_key,
-                linear.weight.shape,
-                minval=-bound,
-                maxval=bound
-            )
-            
-            # Zero bias
+            new_weight = jr.uniform(layer_key, linear.weight.shape, minval=-bound, maxval=bound)
             new_bias = jnp.zeros_like(linear.bias)
             
-            # Apply initialization
             linear = eqx.tree_at(
                 lambda m: (m.weight, m.bias),
                 linear,
@@ -318,29 +239,19 @@ class SHRED_diffrax(eqx.Module):
             
             layers.append(linear)
             
-            # Add activation (not on last layer)
             if i != len(sizes) - 2:
                 layers.append(eqx.nn.Lambda(activation))
 
         self.decoder = eqx.nn.Sequential(layers)
 
     def __call__(self, x):
-        """Forward pass through SHRED model.
-        
-        Args:
-            x: Input sequence, shape (seq_length, input_size)
-        
-        Returns:
-            Output predictions, shape (output_size,)
-        """
-        # Initialize hidden states
+        """Forward pass through SHRED model."""
         init_states = tuple(
             (jnp.zeros(self.hidden_size), jnp.zeros(self.hidden_size))
             for _ in range(self.hidden_layers)
         )
         
         def step(states, x_t):
-            """Process one timestep through all LSTM layers."""
             new_states = []
             layer_input = x_t
             
@@ -351,16 +262,59 @@ class SHRED_diffrax(eqx.Module):
             
             return tuple(new_states), layer_input
         
-        # Scan over sequence
         final_states, outputs = jax.lax.scan(step, init_states, x)
-        
-        # Get final hidden state
         final_hidden = outputs[-1]
-        
-        # Pass through decoder
         return self.decoder(final_hidden)
 
 
+class CustomLSTMCell(eqx.Module):
+    """Custom LSTM cell matching PyTorch nn.LSTM exactly."""
+    
+    weight_ih: jnp.ndarray
+    weight_hh: jnp.ndarray
+    bias_ih: jnp.ndarray
+    bias_hh: jnp.ndarray
+    input_size: int
+    hidden_size: int
+    
+    def __init__(self, input_size: int, hidden_size: int, *, key):
+        """Initialize LSTM cell matching PyTorch nn.LSTM."""
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        
+        key1, key2, key3, key4 = jr.split(key, 4)
+        
+        bound = jnp.sqrt(1.0 / hidden_size)
+        
+        self.weight_ih = jr.uniform(key1, shape=(4 * hidden_size, input_size), minval=-bound, maxval=bound)
+        self.weight_hh = jr.uniform(key2, shape=(4 * hidden_size, hidden_size), minval=-bound, maxval=bound)
+        
+        # Initialize biases randomly
+        self.bias_ih = jr.uniform(key3, shape=(4 * hidden_size,), minval=-bound, maxval=bound)
+        self.bias_hh = jr.uniform(key4, shape=(4 * hidden_size,), minval=-bound, maxval=bound)
+        
+        # ✅ Set forget gate bias to 1.0 (CRITICAL!)
+        self.bias_ih = self.bias_ih.at[hidden_size:2*hidden_size].set(1.0)
+        self.bias_hh = self.bias_hh.at[hidden_size:2*hidden_size].set(1.0)
+    
+    def __call__(self, x, state):
+        """Forward pass through LSTM cell."""
+        h, c = state
+        
+        gates_ih = jnp.dot(self.weight_ih, x) + self.bias_ih
+        gates_hh = jnp.dot(self.weight_hh, h) + self.bias_hh
+        gates = gates_ih + gates_hh
+        
+        i, f, g, o = jnp.split(gates, 4)
+        i = jax.nn.sigmoid(i)
+        f = jax.nn.sigmoid(f)
+        g = jnp.tanh(g)
+        o = jax.nn.sigmoid(o)
+        
+        c_new = f * c + i * g
+        h_new = o * jnp.tanh(c_new)
+        
+        return h_new, c_new
 @eqx.filter_jit 
 def loss_mse_SHRED(model, S_i, y_i):
     """Compute MSE loss matching PyTorch behavior.
