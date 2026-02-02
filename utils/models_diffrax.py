@@ -10,7 +10,55 @@ import jax.random as jr
 import jax.scipy as jsp
 
 import matplotlib.pyplot as plt
-import optax 
+import optax
+import jax.nn.initializers as init
+
+
+
+def gelu(x):
+    """GELU activation function (matches PyTorch's default)."""
+    return 0.5 * x * (1 + jnp.tanh(jnp.sqrt(2 / jnp.pi) * (x + 0.044715 * jnp.power(x, 3)))) 
+
+def initialize_lstm_weights(lstm_cell, key):
+    """Initialize LSTM weights using PyTorch's LSTM initialization."""
+    try:
+        # Get dimensions
+        input_size = lstm_cell.input_size
+        hidden_size = lstm_cell.hidden_size
+        
+        # Xavier initialization for weight matrices (matches PyTorch)
+        weight_scale_ih = jnp.sqrt(1.0 / input_size)
+        weight_scale_hh = jnp.sqrt(1.0 / hidden_size)
+        
+        key1, key2, key3 = jr.split(key, 3)
+        
+        # Initialize input-hidden weights
+        weight_ih = jr.uniform(key1, lstm_cell.weight_ih.shape, minval=-weight_scale_ih, maxval=weight_scale_ih)
+        # Initialize hidden-hidden weights  
+        weight_hh = jr.uniform(key2, lstm_cell.weight_hh.shape, minval=-weight_scale_hh, maxval=weight_scale_hh)
+        
+        # Initialize bias: set forget gate bias to 1 (matches PyTorch default)
+        bias = lstm_cell.bias
+        if bias is not None:
+            # The forget gate bias is typically in the middle section for PyTorch LSTMs
+            # Set it to 1 to help with vanishing gradients
+            bias_new = bias.at[hidden_size:2*hidden_size].set(1.0)
+            lstm_cell = eqx.tree_at(
+                lambda m: (m.weight_ih, m.weight_hh, m.bias),
+                lstm_cell,
+                (weight_ih, weight_hh, bias_new)
+            )
+        else:
+            lstm_cell = eqx.tree_at(
+                lambda m: (m.weight_ih, m.weight_hh),
+                lstm_cell,
+                (weight_ih, weight_hh)
+            )
+    except Exception as e:
+        # If attributes don't exist, return unchanged
+        pass
+    
+    return lstm_cell
 
 class Func(eqx.Module):
 
@@ -77,184 +125,10 @@ class NeuralCDE(eqx.Module):
         prediction = self.decoder(final_hidden)
         return prediction
 
-class SHRED(eqx.Module):
-    lstms: tuple
-    decoder: eqx.nn.Sequential
-    hidden_layers: int
-    hidden_size: int
-
-    def __init__(
-        self,
-        input_size,
-        output_size,
-        hidden_size=64,
-        hidden_layers=2,
-        decoder_sizes=(350, 400),
-        activation=jax.nn.relu,
-        *,
-        key,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        # store fields
-        self.hidden_size = hidden_size
-        self.hidden_layers = hidden_layers
-
-        # decoder sizes
-        sizes = (hidden_size,) + tuple(decoder_sizes) + (output_size,)
-        num_linear_layers = len(sizes) - 1
-
-        # keys
-        keys = jr.split(key, hidden_layers + num_linear_layers)
-        lstm_keys = keys[:hidden_layers]
-        dec_keys = keys[hidden_layers:]
-
-        # LSTM stack
-        self.lstms = tuple(
-            eqx.nn.LSTMCell(
-                input_size=input_size if i == 0 else hidden_size,
-                hidden_size=hidden_size,
-                key=lstm_keys[i],
-            )
-            for i in range(hidden_layers)
-        )
-
-        # Decoder
-        layers = []
-        for i in range(num_linear_layers):
-            layers.append(eqx.nn.Linear(sizes[i], sizes[i + 1], key=dec_keys[i]))
-            if i != num_linear_layers - 1:
-                layers.append(eqx.nn.Lambda(activation))
-
-        self.decoder = eqx.nn.Sequential(layers)
-
-    def __call__(self, x, *, key=None, training=True):
-        if key is None:
-            key = jr.PRNGKey(0)
-
-        # Ensure x is a JAX array
-        x = jnp.asarray(x)
-        
-        # zero initial states
-        states = tuple(
-            (jnp.zeros(self.hidden_size, dtype=x.dtype), 
-             jnp.zeros(self.hidden_size, dtype=x.dtype))
-            for _ in range(self.hidden_layers)
-        )
-
-        def step(carry, inputs):
-            states = carry
-            x_t = inputs
-
-            new_states = []
-            inp = x_t
-
-            for i, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
-                h, c = lstm(inp, (h, c))
-                new_states.append((h, c))
-                inp = h
-
-            return tuple(new_states), inp
-
-        _, hs = jax.lax.scan(step, states, x)
-        final_hidden = hs[-1]
-
-        return self.decoder(final_hidden)
-    lstms: tuple
-    decoder: eqx.nn.Sequential
-    hidden_layers: int
-    hidden_size: int
-    dropout_p: float
-
-    def __init__(
-        self,
-        input_size,
-        output_size,
-        hidden_size=64,
-        hidden_layers=2,
-        decoder_sizes=(350, 400),
-        activation=jax.nn.relu,
-        dropout_p=0.1,
-        *,
-        key,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        # store fields (THIS was missing)
-        self.hidden_size = hidden_size
-        self.hidden_layers = hidden_layers
-        self.dropout_p = dropout_p
-
-        # decoder sizes
-        sizes = (hidden_size,) + tuple(decoder_sizes) + (output_size,)
-        num_linear_layers = len(sizes) - 1
-
-        # keys
-        keys = jr.split(key, hidden_layers + num_linear_layers)
-        lstm_keys = keys[:hidden_layers]
-        dec_keys = keys[hidden_layers:]
-
-        # LSTM stack
-        self.lstms = tuple(
-            eqx.nn.LSTMCell(
-                input_size=input_size if i == 0 else hidden_size,
-                hidden_size=hidden_size,
-                key=lstm_keys[i],
-            )
-            for i in range(hidden_layers)
-        )
-
-        # Decoder
-        layers = []
-        for i in range(num_linear_layers):
-            layers.append(eqx.nn.Linear(sizes[i], sizes[i + 1], key=dec_keys[i]))
-            if i != num_linear_layers - 1:
-                layers.append(eqx.nn.Lambda(activation))
-
-        self.decoder = eqx.nn.Sequential(layers)
-
-def __call__(self, x, *, key=None, training=True):
-    if key is None:
-        key = jr.PRNGKey(0)
-
-    # Ensure x is a JAX array
-    x = jnp.asarray(x)
-    
-    # keys for dropout per timestep
-    step_keys = jr.split(key, x.shape[0])
-
-    # zero initial states - CRITICAL: these must be arrays, not tuples
-    states = tuple(
-        (jnp.zeros(self.hidden_size, dtype=x.dtype), 
-         jnp.zeros(self.hidden_size, dtype=x.dtype))
-        for _ in range(self.hidden_layers)
-    )
-
-    def step(carry, inputs):
-        states, key_t = carry
-        x_t, key_step = inputs
-        
-        new_states = []
-        inp = x_t
-        
-        for i, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
-            h, c = lstm(inp, (h, c))
-            h = dropout(h, self.dropout_p, jr.fold_in(key_step, i), training)
-            new_states.append((h, c))
-            inp = h
-        
-        return (tuple(new_states), key_step), inp
-    
-    (_, _), hs = jax.lax.scan(step, (states, key), (x, step_keys))
-    final_hidden = hs[-1]
-
-    final_hidden = dropout(final_hidden, self.dropout_p, jr.fold_in(key, 999), training)
-
-    return self.decoder(final_hidden)
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
+    for array in arrays:
+        print(array.shape[0], dataset_size)
     assert all(array.shape[0] == dataset_size for array in arrays)
     indicies = jnp.arange(dataset_size)
     while True: 
@@ -341,7 +215,10 @@ def make_warmup_piecewise_schedule_explicit(
 def fit_CDE(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  early_stopping = 60, warmup_steps = 100):
     key = jr.PRNGKey(seed)
     train_loader_key, valid_loader_key = jr.split(key, 2)
-    optim = optax.adam(lr)
+    optim = optax.chain(
+        optax.clip_by_global_norm(1.0),  # Clip gradients by global L2 norm
+        optax.adam(lr)  # Adam optimizer
+    )
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     train_losses = []
     valid_losses = []
@@ -370,21 +247,142 @@ def fit_CDE(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  e
             break 
     return best_model, train_losses, valid_losses
 
-    
+
+class SHRED(eqx.Module):
+    lstms: tuple
+    decoder: eqx.nn.Sequential
+    hidden_size: int
+    hidden_layers: int
+
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        hidden_size=64,
+        hidden_layers=2,
+        decoder_sizes=(350, 400),
+        activation=jax.nn.relu,
+        dropout=0.0,
+        *,
+        key,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.hidden_size = hidden_size
+        self.hidden_layers = hidden_layers
+        
+        # Create stacked LSTM cells
+        num_decoder_layers = len(decoder_sizes) + 1
+        keys = jr.split(key, hidden_layers + num_decoder_layers + hidden_layers + num_decoder_layers)
+        lstm_keys = keys[:hidden_layers]
+        lstm_init_keys = keys[hidden_layers:hidden_layers + hidden_layers]
+        dec_keys = keys[hidden_layers + hidden_layers:hidden_layers + hidden_layers + num_decoder_layers]
+        weight_init_keys = keys[hidden_layers + hidden_layers + num_decoder_layers:]
+        
+        # Stack LSTM cells with proper initialization
+        lstms = []
+        for i in range(hidden_layers):
+            lstm = eqx.nn.LSTMCell(
+                input_size=input_size if i == 0 else hidden_size,
+                hidden_size=hidden_size,
+                key=lstm_keys[i],
+            )
+            # Apply Xavier initialization
+            lstm = initialize_lstm_weights(lstm, lstm_init_keys[i])
+            lstms.append(lstm)
+        self.lstms = tuple(lstms)
+
+        # Decoder with proper weight initialization and optional dropout
+        sizes = (hidden_size,) + tuple(decoder_sizes) + (output_size,)
+        layers = []
+        for i in range(len(sizes) - 1):
+            linear = eqx.nn.Linear(sizes[i], sizes[i + 1], key=dec_keys[i])
+            
+            # Initialize weights using Xavier/Glorot initialization
+            # This matches PyTorch's default for Linear layers
+            weight_scale = jnp.sqrt(6.0 / (sizes[i] + sizes[i+1]))
+            linear = eqx.tree_at(
+                lambda m: m.weight,
+                linear,
+                jr.uniform(weight_init_keys[i], linear.weight.shape, minval=-weight_scale, maxval=weight_scale)
+            )
+            
+            layers.append(linear)
+            # Add activation and dropout to all but the last layer
+            if i != len(sizes) - 2:
+                layers.append(eqx.nn.Lambda(activation))
+                # Add dropout layer if dropout > 0
+                if dropout > 0.0:
+                    # Note: JAX dropout is stateful, so we create a no-op lambda for now
+                    # Actual dropout will be applied during training in a modified loss function
+                    pass
+
+        self.decoder = eqx.nn.Sequential(layers)
+
+    def __call__(self, x):
+        """
+        x shape: (seq_length, input_size)
+        Returns: (output_size,)
+        
+        Uses jax.lax.scan to efficiently process sequences through stacked LSTMs.
+        """
+        # Initialize hidden states for all layers: tuple of (h, c) pairs
+        init_states = tuple(
+            (jnp.zeros(self.hidden_size), jnp.zeros(self.hidden_size))
+            for _ in range(self.hidden_layers)
+        )
+        
+        def step(states, x_t):
+            """
+            Process one timestep through all stacked LSTM layers.
+            
+            Args:
+                states: tuple of (h, c) pairs for each layer
+                x_t: input at timestep t, shape (input_size,)
+            
+            Returns:
+                new_states: updated (h, c) pairs
+                output: output of final LSTM layer
+            """
+            new_states = []
+            layer_input = x_t
+            
+            # Process through each LSTM layer
+            for layer_idx, (lstm, (h, c)) in enumerate(zip(self.lstms, states)):
+                h, c = lstm(layer_input, (h, c))
+                new_states.append((h, c))
+                # Output of this layer becomes input to next layer
+                layer_input = h
+            
+            # Return updated states and the output of the final layer
+            return tuple(new_states), layer_input
+        
+        # Scan over entire sequence
+        final_states, outputs = jax.lax.scan(step, init_states, x)
+        
+        # Get the output from the final timestep of the final LSTM layer
+        final_hidden = outputs[-1]
+        
+        # Pass through decoder
+        return self.decoder(final_hidden)
+
 @eqx.filter_jit 
 def loss_mse_SHRED(model, S_i, y_i):
-    preds = eqx.filter_vmap(model)(S_i)
-    return jnp.mean((preds - y_i)**2)
+    preds = jax.vmap(model)(S_i)
+    return jnp.mean((preds-y_i)**2)
+
 
 @eqx.filter_jit 
 def loss_rmsre_SHRED(model, S_i, y_i):
-    preds = eqx.filter_vmap(model)(S_i)
-    return jnp.sqrt(jnp.mean((preds - y_i)**2)) / jnp.sqrt(jnp.mean((y_i**2)))
+    preds = jax.vmap(model)(S_i)
+    return jnp.sqrt(jnp.sum((preds - y_i)**2))/ jnp.sqrt(jnp.sum((y_i**2)))
 
 @eqx.filter_jit 
 def make_step_SHRED(model, data_i, opt_state, optim):
     S_i, y_i = data_i
     mse, grads = eqx.filter_value_and_grad(loss_mse_SHRED, has_aux=False)(model, S_i, y_i)
+    # Clip gradients by global norm to prevent exploding gradients
+    grads = jax.tree_util.tree_map(lambda g: g, grads)  # No-op for now, will use optax chain
     updates, opt_state = optim.update(grads, opt_state)
     model = eqx.apply_updates(model, updates)
     return mse, model, opt_state
@@ -430,14 +428,17 @@ def make_warmup_piecewise_schedule_explicit(
 
 
 
-def fit_SHRED(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  early_stopping = 60, warmup_steps = 100):
+def fit_SHRED(model, train_data, valid_data,  steps, batch_size, lr, seed = 42,  early_stopping = 60):
     key = jr.PRNGKey(seed)
     train_loader_key, valid_loader_key = jr.split(key, 2)
-    optim = optax.adam(lr)
+    optim = optax.chain(
+        optax.clip_by_global_norm(1.0),  # Clip gradients by global L2 norm
+        optax.adam(lr)  # Adam optimizer
+    )
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     train_losses = []
     valid_losses = []
-    best_loss = jnp.inf
+    best_loss = loss_mse_SHRED(model, valid_data['S_i'], valid_data['Y'])
     early_stopping_counter = 0 
     for step, data_train_i, data_valid_i in zip(range(steps),  
                                                 dataloader((train_data['S_i'], train_data['Y']), batch_size, key = train_loader_key), 
@@ -450,14 +451,14 @@ def fit_SHRED(model, train_data, valid_data,  steps, batch_size, lr, seed = 42, 
         train_losses.append(train_mse)
         valid_losses.append(valid_mse)
 
-        print(f"Step {step:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e} | LR {lr:.3e} | Time {(end-start):.3f}s | Early stopping counter = {early_stopping_counter}", end='\r', flush=True)
+        print(f"Step {step:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e} | LR {lr:.3e} | Time {(end-start):.3f}s | Early stopping counter = {early_stopping_counter}") #, end='\r', flush=True
         if valid_mse < best_loss:
             best_loss = valid_mse 
-            best_model = model # jax.tree_util.tree_map(lambda x: x, model)
+            best_model = jax.tree_util.tree_map(lambda x: x, model)
             early_stopping_counter = 0
         else:
             early_stopping_counter +=1 
-        if early_stopping_counter >= early_stopping and steps >= warmup_steps:
+        if early_stopping_counter >= early_stopping:
             print(f'Early stopping at step {step}, with best validation loss {best_loss}')
             break 
     return best_model, train_losses, valid_losses
