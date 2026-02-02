@@ -1,6 +1,19 @@
 import math 
 import time 
 
+# ADD THIS AT THE TOP OF YOUR SCRIPT
+import jax
+jax.config.update("jax_enable_x64", True)
+
+# Then all your other imports
+import torch
+import jax.numpy as jnp
+import jax.random as jr
+import equinox as eqx
+import optax
+
+# Then import everything else
+
 import diffrax 
 import equinox as eqx
 import jax
