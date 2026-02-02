@@ -376,63 +376,47 @@ def make_step_SHRED(model, data_i, opt_state, optim):
     model = eqx.apply_updates(model, updates)
     return mse, model, opt_state
 
-
 def fit_SHRED(model, train_data, valid_data, steps, batch_size, lr, seed=42, early_stopping=60):
-    """Train SHRED model with early stopping.
+    """Train SHRED model - FIXED to match PyTorch behavior."""
     
-    Args:
-        model: SHRED_diffrax model
-        train_data: Dict with 'S_i' (inputs) and 'Y' (targets) keys
-        valid_data: Dict with 'S_i' (inputs) and 'Y' (targets) keys
-        steps: Maximum number of training steps
-        batch_size: Batch size for training
-        lr: Learning rate
-        seed: Random seed (default: 42)
-        early_stopping: Patience for early stopping (default: 60)
-    
-    Returns:
-        (best_model, train_losses, valid_losses)
-    """
     key = jr.PRNGKey(seed)
-    train_loader_key, valid_loader_key = jr.split(key, 2)
+    train_key = jr.split(key, 1)[0]
     
-    # Setup optimizer with gradient clipping and Adam
-    optim = optax.chain(
-        optax.clip_by_global_norm(1.0),  # Clip gradients by global L2 norm
-        optax.adam(lr)  # Adam optimizer
-    )
+    # optim = optax.chain(
+    #     optax.clip_by_global_norm(1.0),
+    #     optax.adam(lr)
+    # )
+    optim = optax.adam(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     
     train_losses = []
     valid_losses = []
-    best_loss = loss_mse_SHRED(model, valid_data['S_i'], valid_data['Y'])
+    best_loss = jnp.inf
     best_model = model
-    early_stopping_counter = 0 
+    early_stopping_counter = 0
     
-    # Training loop
-    for step, data_train_i, data_valid_i in zip(
-        range(steps),  
-        dataloader((train_data['S_i'], train_data['Y']), batch_size, key=train_loader_key), 
-        dataloader((valid_data['S_i'], valid_data['Y']), batch_size, key=valid_loader_key)
-    ):
-        start = time.time()
+    step_counter = 0
+    
+    # Training loop - ONE dataloader for training
+    train_loader = dataloader((train_data['S_i'], train_data['Y']), batch_size, key=train_key)
+    
+    for data_train_i in train_loader:
+        if step_counter >= steps:
+            break
         
-        # Training step
+        # Training step on batch
         train_mse, model, opt_state = make_step_SHRED(model, data_train_i, opt_state, optim)
-        
-        # Validation step
-        valid_mse = loss_mse_SHRED(model, valid_data['S_i'], valid_data['Y'])
-
-        
-        end = time.time()
         train_losses.append(train_mse)
-        valid_losses.append(valid_mse)
-
-        # Print progress
-    
-        print(f"Step {step:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e} | LR {lr:.3e} | Time {(end-start):.3f}s | S_i.shape {data_train_i[0].shape}, Y.shape {data_train_i[1].shape} ", end='\r')
         
-        # Early stopping logic
+        # Validation on FULL dataset (not mini-batch!)
+        valid_mse = loss_mse_SHRED(model, valid_data['S_i'], valid_data['Y'])
+        valid_losses.append(valid_mse)
+        
+        # Print
+        if (step_counter + 1) % 10 == 0 or step_counter == 0:
+            print(f"Step {step_counter:5d} | Train {train_mse:.4e} | Valid {valid_mse:.4e}")
+        
+        # Early stopping on FULL validation loss
         if valid_mse < best_loss:
             best_loss = valid_mse 
             best_model = jax.tree_util.tree_map(lambda x: x, model)
@@ -441,7 +425,100 @@ def fit_SHRED(model, train_data, valid_data, steps, batch_size, lr, seed=42, ear
             early_stopping_counter += 1 
         
         if early_stopping_counter >= early_stopping:
-            print(f'\n✓ Early stopping at step {step}, with best validation loss {best_loss:.4e}')
-            break 
+            print(f'\n✓ Early stopping at step {step_counter}, best loss: {best_loss:.4e}')
+            break
+        
+        step_counter += 1
     
-    return best_model, train_losses, valid_losses
+    return best_model, jnp.array(train_losses), jnp.array(valid_losses)
+
+
+
+import torch
+import jax.numpy as jnp
+import equinox as eqx
+
+def transfer_weights_pytorch_to_jax(jax_model, pytorch_model):
+    """
+    Transfer weights from PyTorch SHRED model to JAX SHRED_diffrax model.
+    
+    Args:
+        jax_model: SHRED_diffrax model instance
+        pytorch_model: SHRED (PyTorch) model instance
+    
+    Returns:
+        jax_model with weights transferred from pytorch_model
+    """
+    
+    # Transfer LSTM layer 0
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[0].weight_ih,
+        jax_model,
+        jnp.array(pytorch_model.lstm.weight_ih_l0.detach().cpu().numpy())
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[0].weight_hh,
+        jax_model,
+        jnp.array(pytorch_model.lstm.weight_hh_l0.detach().cpu().numpy())
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[0].bias_ih,
+        jax_model,
+        jnp.array(pytorch_model.lstm.bias_ih_l0.detach().cpu().numpy())
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[0].bias_hh,
+        jax_model,
+        jnp.array(pytorch_model.lstm.bias_hh_l0.detach().cpu().numpy())
+    )
+    
+    # Transfer LSTM layer 1
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[1].weight_ih,
+        jax_model,
+        jnp.array(pytorch_model.lstm.weight_ih_l1.detach().cpu().numpy())
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[1].weight_hh,
+        jax_model,
+        jnp.array(pytorch_model.lstm.weight_hh_l1.detach().cpu().numpy())
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[1].bias_ih,
+        jax_model,
+        jnp.array(pytorch_model.lstm.bias_ih_l1.detach().cpu().numpy())
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.lstms[1].bias_hh,
+        jax_model,
+        jnp.array(pytorch_model.lstm.bias_hh_l1.detach().cpu().numpy())
+    )
+    
+    # Transfer decoder - iterate through Linear layers only
+    linear_count = 0
+    for i, layer in enumerate(jax_model.decoder):
+        if isinstance(layer, eqx.nn.Linear):
+            # Find corresponding PyTorch linear layer
+            pytorch_linear_count = 0
+            pytorch_layer = None
+            for pt_layer in pytorch_model.decoder:
+                if isinstance(pt_layer, torch.nn.Linear):
+                    if pytorch_linear_count == linear_count:
+                        pytorch_layer = pt_layer
+                        break
+                    pytorch_linear_count += 1
+            
+            if pytorch_layer is not None:
+                jax_model = eqx.tree_at(
+                    lambda m, idx=i: m.decoder[idx].weight,
+                    jax_model,
+                    jnp.array(pytorch_layer.weight.detach().cpu().numpy())
+                )
+                jax_model = eqx.tree_at(
+                    lambda m, idx=i: m.decoder[idx].bias,
+                    jax_model,
+                    jnp.array(pytorch_layer.bias.detach().cpu().numpy())
+                )
+                linear_count += 1
+    
+    return jax_model
