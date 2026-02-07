@@ -24,22 +24,22 @@ class Func(eqx.Module):
 
     mlp: eqx.nn.MLP
     data_size: int 
-    hidden_size: int 
+    hidden_state: int 
 
-    def __init__(self, data_size, hidden_size, width_size, depth, activation, *, key,  **kwargs):
+    def __init__(self, data_size, hidden_state, width_size, depth, activation, *, key,  **kwargs):
         super().__init__(**kwargs)
         self.data_size = data_size
-        self.hidden_size = hidden_size
+        self.hidden_state = hidden_state
         self.mlp = eqx.nn.MLP(
-            in_size = hidden_size, 
-            out_size = hidden_size*data_size,
+            in_size = hidden_state, 
+            out_size = hidden_state*data_size,
             width_size = width_size, 
             depth = depth, 
             activation = activation,  
             key = key 
         )
     def __call__(self, t, y, args):
-        return self.mlp(y).reshape(self.hidden_size, self.data_size)
+        return self.mlp(y).reshape(self.hidden_state, self.data_size)
 
 class NeuralCDE(eqx.Module):
     initial: eqx.nn.MLP
@@ -47,15 +47,15 @@ class NeuralCDE(eqx.Module):
     linear: eqx.nn.Linear 
     decoder: eqx.nn.Sequential
     
-    def __init__(self, data_size, hidden_size, width_size, depth, activation_cde, activation_decoder, output_size, decoder_sizes, *, key, **kwargs):
+    def __init__(self, data_size, hidden_state, width_size, depth, activation_cde, activation_decoder, output_size, decoder_sizes, *, key, **kwargs):
         super().__init__(**kwargs)
         ikey, fkey, lkey = jr.split(key, 3)
         dkey = jr.split(key, len(decoder_sizes))
-        self.initial = eqx.nn.MLP(data_size, hidden_size, width_size, depth, activation = activation_cde, final_activation = activation_cde, key = ikey)
-        self.func = Func(data_size, hidden_size, width_size, depth, activation_cde, key = fkey)
-        self.linear = eqx.nn.Linear(hidden_size, output_size, key = lkey)
+        self.initial = eqx.nn.MLP(data_size, hidden_state, width_size, depth, activation = activation_cde, final_activation = activation_cde, key = ikey)
+        self.func = Func(data_size, hidden_state, width_size, depth, activation_cde, key = fkey)
+        self.linear = eqx.nn.Linear(hidden_state, output_size, key = lkey)
         layers = []
-        layers.append(eqx.nn.Linear(hidden_size, decoder_sizes[0], key = dkey[0]))
+        layers.append(eqx.nn.Linear(hidden_state, decoder_sizes[0], key = dkey[0]))
         layers.append(eqx.nn.Lambda(activation_decoder))
         for i in range(len(decoder_sizes) -1):
             layers.append(eqx.nn.Linear(decoder_sizes[i], decoder_sizes[i+1], key = dkey[i]))
@@ -76,7 +76,7 @@ class NeuralCDE(eqx.Module):
             ts[-1], 
             dt0, 
             y0, 
-            max_steps= 1000, 
+            max_steps=4096, 
             stepsize_controller = diffrax.PIDController(rtol = 1e-3, atol = 1e-5), 
             saveat = saveat
         )
@@ -113,20 +113,19 @@ def prepare_data_CDE(X, Y):
 
 @eqx.filter_jit 
 def loss_mse_CDE(model, ti, y_i, coeff_i):
+    # coeff_i should be a tuple of coefficient arrays
     preds = jax.vmap(model)(ti, coeff_i)
+    return jnp.mean(jnp.sum((preds - y_i)**2, axis=-1))
 
-    return jnp.mean(jnp.sum((preds - y_i)**2, axis = -1))
 
 @eqx.filter_jit 
 def loss_rmsre_CDE(model, ti, y_i, coeff_i):
     preds = jax.vmap(model)(ti, coeff_i)
-    return jnp.sqrt(jnp.mean((preds - y_i)**2))/ jnp.sqrt(jnp.mean((y_i**2)))
-
+    return jnp.sqrt(jnp.mean((preds - y_i)**2)) / jnp.sqrt(jnp.mean((y_i**2)))
 
 
 @eqx.filter_jit 
-def make_step_CDE(model, data_i, opt_state, optim):
-    ti, y_i, *coeff_i = data_i
+def make_step_CDE(model, ti, y_i, coeff_i, opt_state, optim):
     mse, grads = eqx.filter_value_and_grad(loss_mse_CDE, has_aux=False)(model, ti, y_i, coeff_i)
     updates, opt_state = optim.update(grads, opt_state)
     model = eqx.apply_updates(model, updates)
@@ -221,7 +220,7 @@ def fit_CDE(model, train_data, valid_data, epochs, batch_size, lr, seed=42, earl
             
             # Gradient step
             train_mse, model, opt_state = make_step_CDE(
-                model, (ts_batch, Y_batch) + coeffs_batch, opt_state, optim
+                model, ts_batch, Y_batch, coeffs_batch, opt_state, optim
             )
             epoch_train_loss += float(train_mse)
         

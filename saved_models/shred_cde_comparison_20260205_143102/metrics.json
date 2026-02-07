@@ -1,0 +1,41 @@
+{
+  "shred_final_train_loss": [
+    {
+      "step": null,
+      "value": 2.8166382014751434
+    }
+  ],
+  "shred_final_valid_loss": [
+    {
+      "step": null,
+      "value": 4.780777931213379
+    }
+  ],
+  "shred_best_valid_loss": [
+    {
+      "step": null,
+      "value": 4.30728816986084
+    }
+  ],
+  "cde_final_train_loss": [
+    {
+      "step": null,
+      "value": 2.4157621661822
+    }
+  ],
+  "cde_final_valid_loss": [
+    {
+      "step": null,
+      "value": 5.143110752105713
+    }
+  ],
+  "cde_best_valid_loss": [
+    {
+      "step": null,
+      "value": 4.319586277008057
+    }
+  ],
+  "shred_rmse_train": [
+    {
+      "step": null,
+      "value": 

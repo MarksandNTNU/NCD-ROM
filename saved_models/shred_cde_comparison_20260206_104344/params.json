@@ -1,0 +1,30 @@
+{
+  "data_dir": "data",
+  "nvideos": 2,
+  "nsensors": 3,
+  "lag": 150,
+  "k": 100,
+  "threshold": 0.5,
+  "seed": 0,
+  "hidden_size": 64,
+  "depth": 2,
+  "hidden_state_cde": 20,
+  "decoder_sizes": [
+    350,
+    400
+  ],
+  "epochs": 200,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "early_stopping": 200,
+  "experiment_name": "gopro_reconstruction",
+  "run_name": "shred_cde_comparison",
+  "nframes": 1077,
+  "Lx": 400,
+  "Ly": 504,
+  "nframe": 201600,
+  "nsnapshots": 2154,
+  "n_train_cde": 1483,
+  "n_valid_cde": 185,
+  "n_test_cde": 186
+}

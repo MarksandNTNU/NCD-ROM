@@ -1,0 +1,56 @@
+{
+  "shred_final_train_loss": [
+    {
+      "step": null,
+      "value": 0.06335876074930032
+    }
+  ],
+  "shred_final_valid_loss": [
+    {
+      "step": null,
+      "value": 6.6294097900390625
+    }
+  ],
+  "shred_best_valid_loss": [
+    {
+      "step": null,
+      "value": 4.30728816986084
+    }
+  ],
+  "shred_rmse_train": [
+    {
+      "step": null,
+      "value": 24.24087142944336
+    }
+  ],
+  "shred_rmse_valid": [
+    {
+      "step": null,
+      "value": 28.96814727783203
+    }
+  ],
+  "shred_rmse_test": [
+    {
+      "step": null,
+      "value": 31.575288772583008
+    }
+  ],
+  "cde_rmse_train": [
+    {
+      "step": null,
+      "value": 56.7751579284668
+    }
+  ],
+  "cde_rmse_valid": [
+    {
+      "step": null,
+      "value": 60.60497283935547
+    }
+  ],
+  "cde_rmse_test": [
+    {
+      "step": null,
+      "value": 66.07225799560547
+    }
+  ]
+}

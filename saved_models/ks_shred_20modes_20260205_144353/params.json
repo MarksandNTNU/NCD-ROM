@@ -1,0 +1,30 @@
+{
+  "data_file": "KuramotoSivashinsky_data",
+  "ntrajectories": 100,
+  "train_ratio": 0.8,
+  "L": 22,
+  "nstate": 100,
+  "dt": 0.01,
+  "T": 200.0,
+  "nstepsoutput": 200,
+  "kstate": 20,
+  "nsensors": 3,
+  "idx_sensors": [
+    25,
+    50,
+    75
+  ],
+  "lag": 10,
+  "batch_size": 64,
+  "epochs": 30,
+  "lr": 0.001,
+  "patience": 10,
+  "hidden_size": 64,
+  "hidden_layers": 2,
+  "decoder_sizes": [
+    350,
+    400
+  ],
+  "seed": 0,
+  "experiment_name": "ks_shred_experiment"
+}

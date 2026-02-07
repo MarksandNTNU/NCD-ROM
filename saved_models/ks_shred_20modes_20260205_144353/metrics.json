@@ -1,0 +1,20 @@
+{
+  "test_mre_pod": [
+    {
+      "step": null,
+      "value": 7.272374629974365
+    }
+  ],
+  "test_mre_full": [
+    {
+      "step": null,
+      "value": 21.080421447753906
+    }
+  ],
+  "best_valid_loss": [
+    {
+      "step": null,
+      "value": 0.02883749268949032
+    }
+  ]
+}
